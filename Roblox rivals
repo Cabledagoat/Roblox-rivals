@@ -1,0 +1,421 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local player = Players.LocalPlayer
+assert(player, "Run this on the client after joining the game")
+
+local env = (type(getgenv) == "function" and getgenv()) or _G
+local previous = env.PrivateClientTest
+if type(previous) == "table" and type(previous.Unload) == "function" then
+    pcall(previous.Unload)
+end
+
+local Config = {
+    Aim = false, Trigger = false, Rage = false,
+    Box = false, Health = false, Highlight = false, Skeleton = false,
+    ShowFOV = true, TeamCheck = false, VisibleOnly = true,
+    FOV = 180, Smoothing = 0.12, TriggerDelay = 0.10,
+    ShotInterval = 0.15, RageHeight = 9, MaxDistance = 2500,
+}
+local active, focused = true, true
+local connections, visuals = {}, {}
+local click = type(mouse1click) == "function" and mouse1click or nil
+local lastShot, triggerTarget, triggerSince = 0, nil, 0
+local bindName = "PrivateClientTest_Render"
+local green = Color3.fromRGB(70, 255, 125)
+local red = Color3.fromRGB(255, 75, 85)
+local white = Color3.fromRGB(230, 237, 248)
+
+local function make(class, props, parent)
+    local obj = Instance.new(class)
+    for key, value in pairs(props) do obj[key] = value end
+    obj.Parent = parent
+    return obj
+end
+local function connect(signal, fn)
+    local conn = signal:Connect(fn)
+    table.insert(connections, conn)
+    return conn
+end
+
+local gui = make("ScreenGui", {
+    Name = "PrivateClientTest", IgnoreGuiInset = true,
+    ResetOnSpawn = false, DisplayOrder = 999,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, player:WaitForChild("PlayerGui"))
+local overlay = make("Frame", {
+    Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    BorderSizePixel = 0, Active = false,
+}, gui)
+local circle = make("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 1,
+    Size = UDim2.fromOffset(Config.FOV * 2, Config.FOV * 2),
+}, overlay)
+make("UICorner", {CornerRadius = UDim.new(1, 0)}, circle)
+make("UIStroke", {Color = white, Thickness = 1, Transparency = 0.2}, circle)
+
+local panel = make("ScrollingFrame", {
+    Position = UDim2.fromOffset(18, 70), Size = UDim2.fromOffset(290, 590),
+    BackgroundColor3 = Color3.fromRGB(20, 24, 32), BorderSizePixel = 0,
+    ScrollBarThickness = 4, CanvasSize = UDim2.new(),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y, ZIndex = 10,
+}, gui)
+make("UISizeConstraint", {MaxSize = Vector2.new(290, 590)}, panel)
+make("UIPadding", {
+    PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+    PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+}, panel)
+make("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, panel)
+local order = 0
+local function row(class, text, height)
+    order = order + 1
+    return make(class, {
+        Size = UDim2.new(1, -4, 0, height or 28), LayoutOrder = order,
+        BackgroundColor3 = Color3.fromRGB(35, 41, 54), BorderSizePixel = 0,
+        Font = Enum.Font.Code, TextSize = 13, TextColor3 = white,
+        Text = text, ZIndex = 11,
+    }, panel)
+end
+row("TextLabel", "PRIVATE CLIENT TEST", 30)
+local hint = row("TextLabel", "RMB: aim | RightShift: panel\nEnd: unload | Features start OFF", 38)
+hint.BackgroundTransparency = 1
+local buttons = {}
+local function refresh()
+    for key, entry in pairs(buttons) do
+        entry.button.Text = entry.label .. ": " .. (Config[key] and "ON" or "OFF")
+        entry.button.TextColor3 = Config[key] and green or white
+    end
+end
+local function toggle(key, label)
+    local button = row("TextButton", "")
+    buttons[key] = {button = button, label = label}
+    connect(button.Activated, function()
+        Config[key] = not Config[key]
+        refresh()
+    end)
+end
+toggle("Aim", "Aimbot (hold RMB)")
+toggle("Trigger", "Triggerbot")
+toggle("Rage", "Teleport + fire (experimental)")
+toggle("Box", "ESP boxes")
+toggle("Health", "ESP health")
+toggle("Highlight", "ESP visibility highlight")
+toggle("Skeleton", "ESP skeleton")
+toggle("TeamCheck", "Ignore same Roblox Team")
+toggle("VisibleOnly", "Aim at visible targets only")
+toggle("ShowFOV", "Show FOV circle")
+local function numberInput(key, label, minimum, maximum)
+    local labelRow = row("TextLabel", label, 20)
+    labelRow.BackgroundTransparency = 1
+    local input = row("TextBox", tostring(Config[key]), 26)
+    input.ClearTextOnFocus = false
+    connect(input.FocusLost, function()
+        local value = tonumber(input.Text)
+        if value and value == value then
+            Config[key] = math.clamp(value, minimum, maximum)
+        end
+        input.Text = tostring(Config[key])
+    end)
+end
+numberInput("FOV", "FOV radius: 20-500 pixels", 20, 500)
+numberInput("Smoothing", "Smoothing: 0-1 sec (higher = slower)", 0, 1)
+numberInput("TriggerDelay", "Trigger delay: 0-1 sec", 0, 1)
+numberInput("ShotInterval", "Shot interval: 0.05-2 sec", 0.05, 2)
+numberInput("RageHeight", "Teleport height: 5-30 studs", 5, 30)
+local status = row("TextLabel", "Ready", 40)
+status.TextWrapped = true
+local note = row("TextLabel", "Inventory unlocks unavailable.\nTeam filter uses Roblox Team only.", 38)
+note.BackgroundTransparency = 1
+local unloadButton = row("TextButton", "UNLOAD", 30)
+refresh()
+
+local function destroyVisual(p)
+    local v = visuals[p]
+    if not v then return end
+    v.frame:Destroy()
+    v.highlight:Destroy()
+    visuals[p] = nil
+end
+local function unload()
+    if not active then return end
+    active = false
+    RunService:UnbindFromRenderStep(bindName)
+    for _, conn in ipairs(connections) do conn:Disconnect() end
+    for p in pairs(visuals) do destroyVisual(p) end
+    gui:Destroy()
+    if env.PrivateClientTest and env.PrivateClientTest.Unload == unload then
+        env.PrivateClientTest = nil
+    end
+end
+env.PrivateClientTest = {Config = Config, Unload = unload}
+connect(unloadButton.Activated, unload)
+connect(Players.PlayerRemoving, destroyVisual)
+connect(UIS.WindowFocusReleased, function() focused = false end)
+connect(UIS.WindowFocused, function() focused = true end)
+connect(UIS.InputBegan, function(input, processed)
+    if processed or UIS:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then panel.Visible = not panel.Visible end
+    if input.KeyCode == Enum.KeyCode.End then unload() end
+end)
+
+local function alive(p)
+    local character = p.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local head = character and character:FindFirstChild("Head")
+    if humanoid and humanoid.Health > 0 and root and root:IsA("BasePart")
+        and head and head:IsA("BasePart") then
+        return character, humanoid, root, head
+    end
+end
+local function enemy(p)
+    if p == player then return false end
+    return not (Config.TeamCheck and player.Team ~= nil and p.Team == player.Team)
+end
+local function rayParams(camera)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = {camera}
+    if player.Character then table.insert(ignore, player.Character) end
+    params.FilterDescendantsInstances = ignore
+    return params
+end
+local function visible(camera, params, character, point)
+    local origin = camera.CFrame.Position
+    local hit = Workspace:Raycast(origin, point - origin, params)
+    return hit == nil or hit.Instance:IsDescendantOf(character)
+end
+local function lookAt(from, to)
+    local delta = to - from
+    if delta.Magnitude < 0.001 then return nil end
+    local up = math.abs(delta.Unit.Y) > 0.98 and Vector3.new(0, 0, 1) or Vector3.new(0, 1, 0)
+    return CFrame.lookAt(from, to, up)
+end
+
+local function fire(now)
+    if now - lastShot < Config.ShotInterval then return end
+    lastShot = now
+    if click then
+        local ok, err = pcall(click)
+        if ok then return end
+        click = nil
+        warn("mouse1click failed; trying Tool fallback: " .. tostring(err))
+    end
+    local tool = player.Character and player.Character:FindFirstChildOfClass("Tool")
+    if tool then
+        local ok = pcall(function() tool:Activate() end)
+        if ok then
+            task.delay(0.03, function()
+                if tool.Parent then pcall(function() tool:Deactivate() end) end
+            end)
+            return
+        end
+    end
+    status.Text = "No working firing adapter.\nCustom weapons may ignore Tool inputs."
+end
+
+-- Skeleton connections for standard R15 and R6 characters.
+local edges = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"},
+    {"LeftLowerArm", "LeftHand"}, {"UpperTorso", "RightUpperArm"},
+    {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"},
+    {"LeftLowerLeg", "LeftFoot"}, {"LowerTorso", "RightUpperLeg"},
+    {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+    {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+local function createVisual(p)
+    local frame = make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1}, overlay)
+    local box = make("Frame", {BackgroundTransparency = 1, Visible = false}, frame)
+    local stroke = make("UIStroke", {Color = green, Thickness = 1.5}, box)
+    local health = make("TextLabel", {
+        BackgroundTransparency = 1, Font = Enum.Font.Code, TextSize = 13,
+        TextColor3 = white, TextStrokeTransparency = 0.3, Visible = false,
+    }, frame)
+    local highlight = make("Highlight", {
+        Enabled = false, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        FillTransparency = 0.6, OutlineTransparency = 0,
+    }, gui)
+    local lines = {}
+    for i = 1, #edges do
+        lines[i] = make("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0,
+            BackgroundColor3 = green, Visible = false,
+        }, frame)
+    end
+    local v = {frame = frame, box = box, stroke = stroke, health = health,
+        highlight = highlight, lines = lines}
+    visuals[p] = v
+    return v
+end
+local function bounds(camera, character)
+    -- Direct body parts exclude accessories and equipped weapon bounds.
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+            for x = -1, 1, 2 do
+                for y = -1, 1, 2 do
+                    for z = -1, 1, 2 do
+                        local corner = part.CFrame:PointToWorldSpace(part.Size * Vector3.new(x, y, z) * 0.5)
+                        local point = camera:WorldToViewportPoint(corner)
+                        -- Hide 2D box when the body crosses the near plane.
+                        if point.Z <= 0.1 then return nil end
+                        minX, minY = math.min(minX, point.X), math.min(minY, point.Y)
+                        maxX, maxY = math.max(maxX, point.X), math.max(maxY, point.Y)
+                    end
+                end
+            end
+        end
+    end
+    if minX == math.huge then return nil end
+    local size = camera.ViewportSize
+    if maxX < 0 or maxY < 0 or minX > size.X or minY > size.Y then return nil end
+    return minX, minY, maxX - minX, maxY - minY
+end
+local function updateVisual(p, character, humanoid, color, camera)
+    local v = visuals[p] or createVisual(p)
+    v.frame.Visible = true
+    v.highlight.Adornee = character
+    v.highlight.Enabled = Config.Highlight
+    v.highlight.FillColor, v.highlight.OutlineColor = color, color
+    v.box.Visible, v.health.Visible = false, false
+    if Config.Box or Config.Health then
+        local x, y, w, h = bounds(camera, character)
+        if x then
+            v.box.Position, v.box.Size = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h)
+            v.stroke.Color = color
+            v.box.Visible = Config.Box
+            v.health.Position = UDim2.fromOffset(x - 40, y - 20)
+            v.health.Size = UDim2.fromOffset(w + 80, 18)
+            v.health.Text = string.format("%s  %d/%d HP", p.DisplayName,
+                math.ceil(humanoid.Health), math.ceil(humanoid.MaxHealth))
+            v.health.TextColor3, v.health.Visible = color, Config.Health
+        end
+    end
+    for i, edge in ipairs(edges) do
+        local line = v.lines[i]
+        line.Visible = false
+        if Config.Skeleton then
+            local a, b = character:FindFirstChild(edge[1]), character:FindFirstChild(edge[2])
+            if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+                local pa, onA = camera:WorldToViewportPoint(a.Position)
+                local pb, onB = camera:WorldToViewportPoint(b.Position)
+                if onA and onB and pa.Z > 0.1 and pb.Z > 0.1 then
+                    local start, finish = Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y)
+                    local delta = finish - start
+                    local mid = (start + finish) * 0.5
+                    line.Position = UDim2.fromOffset(mid.X, mid.Y)
+                    line.Size = UDim2.fromOffset(delta.Magnitude, 1.5)
+                    line.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                    line.BackgroundColor3, line.Visible = color, true
+                end
+            end
+        end
+    end
+end
+
+local function overPanel()
+    if not panel.Visible then return false end
+    local mouse = UIS:GetMouseLocation()
+    local pos, size = panel.AbsolutePosition, panel.AbsoluteSize
+    return mouse.X >= pos.X and mouse.Y >= pos.Y
+        and mouse.X <= pos.X + size.X and mouse.Y <= pos.Y + size.Y
+end
+local function frame(dt)
+    local camera = Workspace.CurrentCamera
+    if not camera then return end
+    local center = camera.ViewportSize * 0.5
+    circle.Position = UDim2.fromOffset(center.X, center.Y)
+    circle.Size = UDim2.fromOffset(Config.FOV * 2, Config.FOV * 2)
+    circle.Visible = Config.ShowFOV
+    panel.Size = UDim2.fromOffset(290, math.max(120, math.min(590, camera.ViewportSize.Y - 90)))
+    local params = rayParams(camera)
+    local myCharacter, _, myRoot = alive(player)
+    local canAct = focused and not UIS:GetFocusedTextBox() and not overPanel() and myCharacter ~= nil
+    local aimHead, rageHead, rageRoot
+    local bestAim, bestRage = Config.FOV, math.huge
+    local esp = Config.Box or Config.Health or Config.Highlight or Config.Skeleton
+    for _, v in pairs(visuals) do
+        v.frame.Visible = false
+        v.highlight.Enabled = false
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if enemy(p) then
+            local character, humanoid, root, head = alive(p)
+            if character and (head.Position - camera.CFrame.Position).Magnitude <= Config.MaxDistance then
+                local seen = visible(camera, params, character, head.Position)
+                if esp then updateVisual(p, character, humanoid, seen and green or red, camera) end
+                if not character:FindFirstChildOfClass("ForceField") then
+                    local point, onScreen = camera:WorldToViewportPoint(head.Position)
+                    local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
+                    if onScreen and point.Z > 0 and distance <= bestAim
+                        and (not Config.VisibleOnly or seen) then
+                        bestAim, aimHead = distance, head
+                    end
+                    if myRoot then
+                        local worldDistance = (root.Position - myRoot.Position).Magnitude
+                        if worldDistance < bestRage then
+                            bestRage, rageHead, rageRoot = worldDistance, head, root
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if not canAct then triggerTarget = nil; return end
+    local now = os.clock()
+    if Config.Rage and rageHead and rageRoot then
+        local destination = rageRoot.Position + Vector3.new(0, Config.RageHeight, 0)
+        local pose = lookAt(destination, rageHead.Position)
+        if pose then
+            myRoot.CFrame = pose
+            myRoot.AssemblyLinearVelocity = Vector3.zero
+            local view = lookAt(camera.CFrame.Position, rageHead.Position)
+            if view then camera.CFrame = view end
+            -- Don't fire through an obstacle merely because teleport was attempted.
+            if visible(camera, params, rageHead.Parent, rageHead.Position) then fire(now) end
+        end
+        triggerTarget = nil
+        return
+    end
+    if Config.Aim and aimHead and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        local targetCFrame = lookAt(camera.CFrame.Position, aimHead.Position)
+        if targetCFrame then
+            local alpha = Config.Smoothing <= 0 and 1 or (1 - math.exp(-dt / Config.Smoothing))
+            camera.CFrame = camera.CFrame:Lerp(targetCFrame, alpha)
+        end
+    end
+    if not Config.Trigger then triggerTarget = nil; return end
+    local ray = camera:ViewportPointToRay(center.X, center.Y)
+    local hit = Workspace:Raycast(ray.Origin, ray.Direction * Config.MaxDistance, params)
+    local target
+    if hit then
+        for _, p in ipairs(Players:GetPlayers()) do
+            local character = enemy(p) and alive(p)
+            if character and hit.Instance:IsDescendantOf(character)
+                and not character:FindFirstChildOfClass("ForceField") then
+                target = p
+                break
+            end
+        end
+    end
+    if not target then triggerTarget = nil; return end
+    if target ~= triggerTarget then triggerTarget, triggerSince = target, now end
+    if now - triggerSince >= Config.TriggerDelay then fire(now) end
+end
+
+local lastError = 0
+RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+    if not active then return end
+    local ok, err = pcall(frame, dt)
+    if not ok and os.clock() - lastError > 3 then
+        lastError = os.clock()
+        warn("Private client test: " .. tostring(err))
+        status.Text = "Runtime error; see executor console."
+    end
+end)
+status.Text = click and "Fire adapter: mouse1click\nRIVALS compatibility unverified."
+    or "Fire adapter: equipped Tool\nCustom weapons may ignore it."
